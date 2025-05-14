@@ -1,0 +1,15 @@
+name: NostrCraft
+version: 1.0
+main: org.sectiontwo.nostrcraft
+api-version: '1.21.5'
+description: A Minecraft plugin that broadcasts server events to the Nostr network
+author: Jonny
+commands:
+  nostr:
+    description: Base command for NostrCraft plugin
+    usage: /nostr [send|info]
+    permission: nostrcraft.command
+permissions:
+  nostrcraft.command:
+    description: Allows usage of NostrCraft commands
+    default: op

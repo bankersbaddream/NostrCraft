@@ -1,0 +1,4 @@
+# NostrCraft Configuration
+private-key: "db02e95744b6e8a1e36d8133f0ce420448738e31ebddd39fcc21b750748365c7"
+public-key: "cc8efc1c5156be25aca61598638e1fe0ea8f6961db4e41c2ab16f688822b73fb"
+relay: "wss://relay.damus.io"
