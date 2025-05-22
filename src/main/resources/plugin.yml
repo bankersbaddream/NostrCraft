@@ -1,6 +1,6 @@
 name: NostrCraft
 version: 1.0
-main: org.sectiontwo.nostrcraft
+main: org.sectiontwo.nostrcraft.NostrCraft
 api-version: '1.21.5'
 description: A Minecraft plugin that broadcasts server events to the Nostr network
 author: Jonny
