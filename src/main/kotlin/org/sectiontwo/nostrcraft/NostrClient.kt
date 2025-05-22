@@ -3,12 +3,16 @@ package org.sectiontwo.nostrcraft
 import org.java_websocket.client.*
 import org.java_websocket.handshake.*
 import java.net.URI
-import java.util.*
 import kotlinx.serialization.json.*
 import java.security.*
-import java.security.spec.*
-import java.util.Base64
+import java.math.BigInteger
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.jce.spec.ECPrivateKeySpec
+import org.bouncycastle.jce.ECNamedCurveTable
+import org.bouncycastle.crypto.signers.ECDSASigner
+import org.bouncycastle.crypto.params.ECPrivateKeyParameters
+import org.bouncycastle.crypto.params.ECDomainParameters
+import org.bouncycastle.util.encoders.Hex
 import org.bukkit.Bukkit
 
 class NostrClient(
@@ -27,11 +31,14 @@ class NostrClient(
     fun connect() {
         ws = object : WebSocketClient(URI(relay)) {
             override fun onOpen(handshakedata: ServerHandshake?) {
-                Bukkit.getLogger().info("Connected to Nostr relay")
+                Bukkit.getLogger().info("Connected to Nostr relay: $relay")
             }
             
             override fun onMessage(message: String?) {
-                // Optional: handle relay responses
+                // Handle relay responses if needed
+                message?.let {
+                    Bukkit.getLogger().fine("Relay response: $it")
+                }
             }
             
             override fun onClose(code: Int, reason: String?, remote: Boolean) {
@@ -46,116 +53,116 @@ class NostrClient(
     }
     
     fun disconnect() {
-        if (::ws.isInitialized) {
+        if (::ws.isInitialized && !ws.isClosed) {
             ws.close()
         }
     }
     
     fun publishNote(content: String, tags: List<List<String>> = emptyList()) {
-        val now = System.currentTimeMillis() / 1000
-        
-        // Create unsigned event for ID calculation
-        val unsignedEvent = buildJsonObject {
-            put("pubkey", publicKeyHex)
-            put("created_at", JsonPrimitive(now))
-            put("kind", JsonPrimitive(1))
-            putJsonArray("tags") { 
-                tags.forEach { tag ->
-                    addJsonArray { 
-                        tag.forEach { str -> add(JsonPrimitive(str)) } 
-                    } 
-                } 
-            }
-            put("content", JsonPrimitive(content))
+        if (!::ws.isInitialized || ws.isClosed) {
+            Bukkit.getLogger().warning("WebSocket not connected, cannot publish note")
+            return
         }
         
-        // Calculate the event ID (sha256 of the serialized event)
-        val serializedEvent = Json.encodeToString(JsonObject.serializer(), unsignedEvent)
-        val id = serializedEvent.sha256()
-        
-        // Sign the ID
-        val sig = sign(id, privateKeyHex)
-        
-        // Create the complete event
-        val eventMessage = buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("pubkey", JsonPrimitive(publicKeyHex))
-            put("created_at", JsonPrimitive(now))
-            put("kind", JsonPrimitive(1))
-            putJsonArray("tags") { 
-                tags.forEach { tag ->
-                    addJsonArray { 
-                        tag.forEach { str -> add(JsonPrimitive(str)) } 
+        try {
+            val now = System.currentTimeMillis() / 1000
+            
+            // Create the event array for ID calculation (NIP-01 format)
+            val eventArray = JsonArray(listOf(
+                JsonPrimitive(0), // reserved
+                JsonPrimitive(publicKeyHex), // pubkey
+                JsonPrimitive(now), // created_at
+                JsonPrimitive(1), // kind
+                buildJsonArray { 
+                    tags.forEach { tag ->
+                        addJsonArray { 
+                            tag.forEach { str -> add(JsonPrimitive(str)) } 
+                        } 
                     } 
-                } 
+                }, // tags
+                JsonPrimitive(content) // content
+            ))
+            
+            // Calculate the event ID (sha256 of the serialized event array)
+            val serializedEvent = Json.encodeToString(JsonArray.serializer(), eventArray)
+            val id = serializedEvent.sha256()
+            
+            // Sign the ID
+            val sig = signEventId(id)
+            
+            // Create the complete event
+            val eventMessage = buildJsonObject {
+                put("id", id)
+                put("pubkey", publicKeyHex)
+                put("created_at", now)
+                put("kind", 1)
+                putJsonArray("tags") { 
+                    tags.forEach { tag ->
+                        addJsonArray { 
+                            tag.forEach { str -> add(JsonPrimitive(str)) } 
+                        } 
+                    } 
+                }
+                put("content", content)
+                put("sig", sig)
             }
-            put("content", JsonPrimitive(content))
-            put("sig", JsonPrimitive(sig))
+            
+            // Send to relay
+            val message = buildJsonArray {
+                add("EVENT")
+                add(eventMessage)
+            }
+            
+            ws.send(Json.encodeToString(JsonArray.serializer(), message))
+            Bukkit.getLogger().fine("Published note: $content")
+            
+        } catch (e: Exception) {
+            Bukkit.getLogger().severe("Error publishing note: ${e.message}")
+            e.printStackTrace()
         }
-        
-        // Send to relay
-        ws.send("[\"EVENT\",${Json.encodeToString(JsonObject.serializer(), eventMessage)}]")
     }
     
-    private fun sign(eventId: String, privateKeyHex: String): String {
+    private fun signEventId(eventId: String): String {
         try {
-            // Convert hex private key to bytes
-            val privateKeyBytes = hexToBytes(privateKeyHex)
+            // Convert hex strings to bytes
+            val privateKeyBytes = Hex.decode(privateKeyHex)
+            val eventIdBytes = Hex.decode(eventId)
             
-            // Create private key
-            val kf = KeyFactory.getInstance("EC", "BC")
-            val pkSpec = PKCS8EncodedKeySpec(privateKeyBytes)
-            val privateKey = kf.generatePrivate(pkSpec)
+            // Get secp256k1 curve parameters
+            val curve = ECNamedCurveTable.getParameterSpec("secp256k1")
+            val domain = ECDomainParameters(curve.curve, curve.g, curve.n, curve.h)
             
-            // Sign the event ID
-            val signature = Signature.getInstance("SHA256withECDSA", "BC")
-            signature.initSign(privateKey)
-            signature.update(hexToBytes(eventId))
+            // Create private key parameter
+            val privateKeyInt = BigInteger(1, privateKeyBytes)
+            val privateKeyParams = ECPrivateKeyParameters(privateKeyInt, domain)
             
-            // Return signature as hex string
-            return bytesToHex(signature.sign())
+            // Sign using ECDSA
+            val signer = ECDSASigner()
+            signer.init(true, privateKeyParams)
+            val signature = signer.generateSignature(eventIdBytes)
+            
+            // Format signature as hex (r + s)
+            val r = signature[0].toByteArray()
+            val s = signature[1].toByteArray()
+            
+            // Ensure r and s are 32 bytes each
+            val rPadded = ByteArray(32)
+            val sPadded = ByteArray(32)
+            
+            System.arraycopy(r, maxOf(0, r.size - 32), rPadded, maxOf(0, 32 - r.size), minOf(32, r.size))
+            System.arraycopy(s, maxOf(0, s.size - 32), sPadded, maxOf(0, 32 - s.size), minOf(32, s.size))
+            
+            return Hex.toHexString(rPadded + sPadded)
+            
         } catch (e: Exception) {
             Bukkit.getLogger().severe("Error signing Nostr event: ${e.message}")
             throw e
         }
-    }
-    
-    private fun hexToBytes(hex: String): ByteArray {
-        val len = hex.length
-        val data = ByteArray(len / 2)
-        var i = 0
-        while (i < len) {
-            data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
-            i += 2
-        }
-        return data
-    }
-    
-    private fun bytesToHex(bytes: ByteArray): String {
-        val hexChars = "0123456789abcdef"
-        val result = StringBuilder(bytes.size * 2)
-        bytes.forEach { b ->
-            val i = b.toInt() and 0xFF
-            result.append(hexChars[i shr 4])
-            result.append(hexChars[i and 0x0F])
-        }
-        return result.toString()
     }
 }
 
 fun String.sha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     val hash = digest.digest(this.toByteArray(Charsets.UTF_8))
-    return bytesToHex(hash)
-}
-
-private fun bytesToHex(bytes: ByteArray): String {
-    val hexChars = "0123456789abcdef"
-    val result = StringBuilder(bytes.size * 2)
-    bytes.forEach { b ->
-        val i = b.toInt() and 0xFF
-        result.append(hexChars[i shr 4])
-        result.append(hexChars[i and 0x0F])
-    }
-    return result.toString()
+    return Hex.toHexString(hash)
 }
