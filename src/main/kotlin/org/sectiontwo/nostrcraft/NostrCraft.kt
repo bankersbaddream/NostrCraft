@@ -5,15 +5,60 @@ import org.bukkit.event.Listener
 import org.bukkit.event.EventHandler
 import org.bukkit.event.player.PlayerJoinEvent
 import org.bukkit.event.player.PlayerQuitEvent
-import org.bukkit.event.block.BlockPlaceEvent
-import org.bukkit.event.block.BlockBreakEvent
-import org.bukkit.event.player.PlayerInteractEvent
-// No need to import NostrClient as it's in the same package now
+import org.bukkit.event.player.AsyncPlayerChatEvent
+import org.bukkit.Bukkit
 
-public class NostrCraft extends JavaPlugin implements Listener {
-    @Override
-    public void onEnable() {
-        Bukkit.getPluginManager().registerEvents(this, this);
+class NostrCraft : JavaPlugin(), Listener {
+    
+    private lateinit var nostrClient: NostrClient
+    
+    override fun onEnable() {
+        // Save default config if it doesn't exist
+        saveDefaultConfig()
+        
+        // Load configuration
+        val privateKey = config.getString("private-key") ?: ""
+        val publicKey = config.getString("public-key") ?: ""
+        val relay = config.getString("relay") ?: "wss://relay.damus.io"
+        
+        if (privateKey.isEmpty() || publicKey.isEmpty()) {
+            logger.severe("Private key or public key not configured! Plugin disabled.")
+            pluginLoader.disablePlugin(this)
+            return
+        }
+        
+        // Initialize Nostr client
+        nostrClient = NostrClient(relay, privateKey, publicKey)
+        
+        // Connect to relay
+        try {
+            nostrClient.connect()
+            logger.info("NostrCraft enabled and connected to $relay")
+            
+            // Publish server start event
+            nostrClient.publishNote("Minecraft server started", 
+                listOf(listOf("e", "server_start")))
+                
+        } catch (e: Exception) {
+            logger.severe("Failed to connect to Nostr relay: ${e.message}")
+        }
+        
+        // Register event listeners
+        Bukkit.getPluginManager().registerEvents(this, this)
+    }
+    
+    override fun onDisable() {
+        if (::nostrClient.isInitialized) {
+            // Publish server stop event
+            nostrClient.publishNote("Minecraft server stopped", 
+                listOf(listOf("e", "server_stop")))
+            
+            // Give a moment for the message to send
+            Thread.sleep(1000)
+            
+            nostrClient.disconnect()
+        }
+        logger.info("NostrCraft disabled")
     }
 
     @EventHandler
